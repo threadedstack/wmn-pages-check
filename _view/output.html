@@ -1,0 +1,1360 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>wmn output</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; worker-src 'none'; child-src 'none'; frame-src 'none'; object-src 'none'; manifest-src 'none'; form-action 'none'; base-uri 'none'; require-trusted-types-for 'script'; trusted-types *">
+<script>if (self.origin !== "null") throw new Error("an output frame runs only in a sandboxed frame");
+// wmn frame guard (ROADMAP C-019a, C-019k). The first script of every frame document that runs output or view code: the output origin's frame.html (HTML,
+// SVG, charts, block views, a guest of a share link), the app's own view frame (view-frame.ts) and the live frames of a published page (publish
+// live.ts) take THIS text, so the three cannot differ. It runs before the theme runtime and before any output code.
+//
+// WebRTC. No browser honours a CSP directive for it (`webrtc 'block'` is an "unrecognized directive" in Chromium 153, Firefox 155 and WebKit:
+// measured), so `connect-src 'none'` does nothing here: a script in the frame could build
+// `new RTCPeerConnection({iceServers:[{urls:'turn:HOST:PORT', username:DATA}]})` and the browser sends STUN and TURN packets (the username is
+// data the script chose) to any host, and tells that host the reader's addresses. The constructors are taken away, and the properties are not
+// configurable: the script cannot delete or redefine them.
+//
+// Nested documents (C-019k). `worker-src 'none'` stops every worker, and `frame-src 'none'` stops every frame with a `src` (a `javascript:` frame is
+// refused by Trusted Types), but `frame-src` does not apply to a `srcdoc` document, which runs scripts in a realm of its own with its own
+// constructors. So every iframe `srcdoc` is rewritten before its document exists: this guard text goes in front of the markup (the child runs the same
+// guard, to any depth), link elements are renamed, declarative shadow roots are switched off, and the markup's own srcdoc attributes are renamed so that
+// its parser makes no frame before its observer has given that frame the guard. The same script locks the other ways to make a link
+// element or a nested document. This is a closing list, not a proof: a same-realm guard cannot be shown complete (docs/DECISIONS.md, C-019k).
+// This text holds no closing-tag sequence and no comment opener: it is injected into srcdoc strings and into three kinds of inline script.
+(function () {
+  'use strict'
+  var names = ['RTCPeerConnection', 'webkitRTCPeerConnection', 'mozRTCPeerConnection']
+  for (var i = 0; i < names.length; i++) {
+    try { Object.defineProperty(self, names[i], { value: undefined, writable: false, configurable: false, enumerable: false }) } catch (x) {}
+  }
+})()
+
+;(function () {
+  'use strict'
+  // ---- everything the guard uses at run time is captured here, once, before any other script runs; run-time code only calls these, through
+  // `apply`, and never reads a prototype, a global or a property of an instance (output code can poison or shadow all of them)
+  var apply = Reflect.apply
+  var def = Object.defineProperty
+  var gopd = Object.getOwnPropertyDescriptor
+  var nul = Object.create
+  var S = String
+  var SP = String.prototype
+  var idxOf = SP.indexOf, lastIdx = SP.lastIndexOf, sliceS = SP.slice, lowerS = SP.toLowerCase, cca = SP.charCodeAt
+  var MO = MutationObserver
+  var WM = WeakMap
+  var wmGet = WM.prototype.get, wmSet = WM.prototype.set
+  var moObserve = MO.prototype.observe
+  var DP = DOMParser
+  var parseNative = DP.prototype.parseFromString
+  var getter = function (proto, name) { var d = gopd(proto, name); return d && d.get }
+  var nodeTypeOf = getter(Node.prototype, 'nodeType')
+  var localNameOf = getter(Element.prototype, 'localName')
+  var nsOf = getter(Element.prototype, 'namespaceURI')
+  var parentOf = getter(Node.prototype, 'parentNode')
+  var childOf = getter(Document.prototype, 'documentElement')
+  var contentOf = getter(HTMLTemplateElement.prototype, 'content')
+  var textOf = getter(Node.prototype, 'textContent')
+  var recType = getter(MutationRecord.prototype, 'type')
+  var recAttr = getter(MutationRecord.prototype, 'attributeName')
+  var recTarget = getter(MutationRecord.prototype, 'target')
+  var recAdded = getter(MutationRecord.prototype, 'addedNodes')
+  var listLen = getter(NodeList.prototype, 'length')
+  var listItem = NodeList.prototype.item
+  var rmChild = Node.prototype.removeChild
+  var qsaEl = Element.prototype.querySelectorAll
+  var qsaFrag = DocumentFragment.prototype.querySelectorAll
+  var qsaDoc = Document.prototype.querySelectorAll
+  var getAttr = Element.prototype.getAttribute
+  var setAttr = Element.prototype.setAttribute
+  var rmAttr = Element.prototype.removeAttribute
+  var innerSetEl = (gopd(Element.prototype, 'innerHTML') || {}).set
+  var innerSetShadow = (gopd(ShadowRoot.prototype, 'innerHTML') || {}).set
+  var XHTML = 'http://www.w3.org/1999/xhtml'
+  var fcc = S.fromCharCode
+  var CLOSE = apply(fcc, S, [60, 47]) // the two characters that start a closing tag, built so that this text holds none
+  var TE = TypeError
+  var cs = document.currentScript
+  var SRC = ''
+  try { SRC = cs ? S(apply(textOf, cs, [])) : '' } catch (x) { SRC = '' }
+  if (SRC.length > 0 && apply(idxOf, SRC, [CLOSE]) >= 0) SRC = '' // fail closed: a guard text that holds a closing tag cannot be injected as an inline script
+
+  function lock(proto, name, make) {
+    if (!proto || typeof proto[name] !== 'function') return
+    def(proto, name, { value: make(proto[name]), writable: false, configurable: false, enumerable: true })
+  }
+
+  // ---- link text: a start tag `<link`, `<x:link` (any prefix), any case, found without a regular expression (RegExp.prototype can be changed)
+  var CASINGS = []
+  ;(function () {
+    var base = 'link'
+    for (var m = 0; m < 16; m++) {
+      var w = ''
+      for (var i = 0; i < 4; i++) {
+        var c = apply(sliceS, base, [i, i + 1])
+        w += (m >> i) & 1 ? apply(sliceS, 'LINK', [i, i + 1]) : c
+      }
+      CASINGS[m] = w
+    }
+  })()
+  var isWs = function (c) { return c === 9 || c === 10 || c === 12 || c === 13 || c === 32 }
+  var isTerm = function (c) { return isWs(c) || c === 47 || c === 62 }
+  function tagStart(s, p) {
+    var q = p - 1
+    if (q < 0) return -1
+    var c = apply(cca, s, [q])
+    if (c === 60) return q
+    if (c !== 58) return -1
+    q--
+    var n = 0
+    while (q >= 0) {
+      c = apply(cca, s, [q])
+      if (c === 60) return n > 0 ? q : -1
+      if (isWs(c) || c === 62 || c === 47 || c === 58) return -1
+      n++
+      q--
+    }
+    return -1
+  }
+  function rewriteLinks(v) {
+    var s = S(v)
+    for (var k = 0; k < 16; k++) {
+      var key = CASINGS[k], from = 0, last = 0, out = '', any = false
+      for (;;) {
+        var p = apply(idxOf, s, [key, from])
+        if (p < 0) break
+        from = p + 4
+        if (!isTerm(apply(cca, s, [p + 4]))) continue
+        var st = tagStart(s, p)
+        if (st < 0) continue
+        out += apply(sliceS, s, [last, st]) + '<wmn-blocked-link'
+        last = p + 4
+        any = true
+      }
+      if (any) s = out + apply(sliceS, s, [last])
+    }
+    return s
+  }
+
+  // ---- (1) DOM-API ways to make a link element: coerce once, pass the coerced string
+  var isLinkName = function (q) {
+    var i = apply(lastIdx, q, [':'])
+    return apply(lowerS, i < 0 ? q : apply(sliceS, q, [i + 1]), []) === 'link'
+  }
+  var inert = function (q) { return isLinkName(q) ? 'wmn-blocked-link' : q }
+  lock(Document.prototype, 'createElement', function (o) { return function createElement(n) {
+    if (arguments.length === 0) return apply(o, this, [])
+    var q = inert(S(n))
+    return arguments.length > 1 ? apply(o, this, [q, arguments[1]]) : apply(o, this, [q])
+  } })
+  lock(Document.prototype, 'createElementNS', function (o) { return function createElementNS(ns, n) {
+    if (arguments.length < 2) return apply(o, this, arguments)
+    var q = inert(S(n))
+    return arguments.length > 2 ? apply(o, this, [ns, q, arguments[2]]) : apply(o, this, [ns, q])
+  } })
+  lock(DOMImplementation.prototype, 'createDocument', function (o) { return function createDocument(ns, n, dt) {
+    if (arguments.length < 2) return apply(o, this, arguments)
+    var q = n === null ? '' : inert(S(n))
+    return arguments.length > 2 ? apply(o, this, [ns, q, dt]) : apply(o, this, [ns, q])
+  } })
+  lock(CustomElementRegistry.prototype, 'define', function (o) { return function define(n, c, opt) {
+    if (arguments.length < 3 || opt === undefined || opt === null) return apply(o, this, arguments)
+    var ext = opt.extends
+    var o2 = nul(null) // a dictionary handed to a native has no prototype: Object.prototype can add keys (a getter that changes between reads) to any literal
+    if (ext !== undefined) o2.extends = isLinkName(S(ext)) ? 'span' : S(ext)
+    return apply(o, this, [n, c, o2])
+  } })
+
+  // ---- (2) DOM-producing parsers: remove link elements from what they return, before anything can insert it
+  function strip(root) {
+    var t = apply(nodeTypeOf, root, [])
+    var all = apply(t === 9 ? qsaDoc : t === 11 ? qsaFrag : qsaEl, root, ['*'])
+    for (var i = apply(listLen, all, []) - 1; i >= 0; i--) {
+      var e = apply(listItem, all, [i])
+      var ln = apply(localNameOf, e, [])
+      if (ln === 'link' && apply(nsOf, e, []) === XHTML) { var par = apply(parentOf, e, []); if (par) apply(rmChild, par, [e]) }
+      else if (ln === 'template') { var ct = apply(contentOf, e, []); if (ct) strip(ct) }
+    }
+    return root
+  }
+  function stripDoc(d) {
+    var de = apply(childOf, d, [])
+    if (de && apply(localNameOf, de, []) === 'link' && apply(nsOf, de, []) === XHTML) apply(rmChild, d, [de])
+    return strip(d)
+  }
+  lock(DP.prototype, 'parseFromString', function (o) { return function parseFromString(a, b) { return stripDoc(apply(o, this, [S(a), S(b)])) } })
+  if (self.XSLTProcessor) {
+    lock(XSLTProcessor.prototype, 'transformToFragment', function (o) { return function transformToFragment() { return strip(apply(o, this, arguments)) } })
+    lock(XSLTProcessor.prototype, 'transformToDocument', function (o) { return function transformToDocument() { return stripDoc(apply(o, this, arguments)) } })
+  }
+
+  // ---- (3) a tag split across document.write calls reaches the parser whole: write, writeln and open are dead (as the bootstrap made them in the frame)
+  var noop = function () {}
+  var open_ = function open() { return this }
+  lock(Document.prototype, 'write', function () { return noop })
+  lock(Document.prototype, 'writeln', function () { return noop })
+  lock(Document.prototype, 'open', function () { return open_ })
+
+  // ---- (4) string sinks: Trusted Types default policy where the browser has it
+  try {
+    var tt = self.trustedTypes
+    if (tt && typeof tt.createPolicy === 'function') {
+      var factory = Object.getPrototypeOf(tt)
+      var origCreate = factory.createPolicy
+      var dp = nul(null)
+      dp.createHTML = rewriteLinks
+      dp.createScript = function (s) { return s }
+      dp.createScriptURL = function (u) { return u }
+      apply(origCreate, tt, ['default', dp])
+      def(factory, 'createPolicy', { value: function createPolicy(name, opt) {
+        var ch, cs2, cu
+        if (opt !== undefined && opt !== null) { ch = opt.createHTML; cs2 = opt.createScript; cu = opt.createScriptURL }
+        var w = nul(null)
+        if (typeof ch === 'function') w.createHTML = function () { return rewriteLinks(apply(ch, this, arguments)) }
+        if (typeof cs2 === 'function') w.createScript = cs2
+        if (typeof cu === 'function') w.createScriptURL = cu
+        return apply(origCreate, this, [name, w])
+      }, writable: false, configurable: false, enumerable: true })
+    }
+  } catch (x) { /* a browser that refuses: today's behaviour */ }
+
+  // ---- (5) nested documents. An iframe's srcdoc child is made as a task after the attribute is set; a MutationObserver runs before that.
+  // Every iframe with a srcdoc gets this guard in front of its markup (links rewritten in the DECODED text); with no guard text to inject the srcdoc is emptied.
+  var last = new WM()
+  function afterDoctype(v) {
+    // only leading whitespace and a literal `<!doctype ...>` are skipped; anything else (a comment included: the parser ends comments at three-dash-close, bang-close
+    // and two abrupt forms, a scan that follows another rule can land behind hostile markup) means index 0
+    var i = 0, n = v.length
+    while (i < n && isWs(apply(cca, v, [i]))) i++
+    if (apply(lowerS, apply(sliceS, v, [i, i + 9]), []) === '<!doctype') { var g = apply(idxOf, v, ['>', i]); return g < 0 ? 0 : g + 1 }
+    return 0
+  }
+  // `shadowroot` / `shadowrootmode` (any case) make the child's own parser build a shadow root that nothing watches: the name gets an `x-` in front. Found with the
+  // same captured indexOf as the link scan: 16 casings of `root`, then the six characters before it folded to lower case and compared with `shadow`.
+  var ROOTS = []
+  ;(function () {
+    for (var m = 0; m < 16; m++) {
+      var w = ''
+      for (var i = 0; i < 4; i++) w += (m >> i) & 1 ? apply(sliceS, 'ROOT', [i, i + 1]) : apply(sliceS, 'root', [i, i + 1])
+      ROOTS[m] = w
+    }
+  })()
+  var SHADOW = 'shadow'
+  var foldIs = function (s, at, word) {
+    for (var i = 0; i < word.length; i++) {
+      var c = apply(cca, s, [at + i]), d = apply(cca, word, [i])
+      if (c !== d && c !== d - 32) return false
+    }
+    return true
+  }
+  function neuterShadow(v) {
+    var s = v
+    for (var k = 0; k < 16; k++) {
+      var key = ROOTS[k], from = 0, last = 0, out = '', any = false
+      for (;;) {
+        var p = apply(idxOf, s, [key, from])
+        if (p < 0) break
+        from = p + 4
+        if (p < 6 || !foldIs(s, p - 6, SHADOW)) continue
+        if (p >= 8 && apply(sliceS, s, [p - 8, p - 6]) === 'x-') continue
+        out += apply(sliceS, s, [last, p - 6]) + 'x-'
+        last = p - 6
+        any = true
+      }
+      if (any) s = out + apply(sliceS, s, [last])
+    }
+    return s
+  }
+  // a `srcdoc` attribute in a nested document's markup is renamed `x-srcdoc` before that document's parser sees it: WebKit loads a frame its parser makes
+  // as soon as it is inserted, before the nested document's observer runs, so the frame would get the raw markup (no guard, links not rewritten). The
+  // parser makes an iframe with nothing to load; police() moves the value to `srcdoc` through inject(). Found where the tokenizer reads an attribute
+  // name: after whitespace, `/` or a quote, ending at whitespace, `/`, `=`, `>` or the end; any case (8 casings of `doc`, then `src` folded). Text
+  // outside a tag of the same shape is renamed too (fail closed).
+  var XSD = 'x-srcdoc'
+  var DOCS = []
+  ;(function () {
+    for (var m = 0; m < 8; m++) {
+      var w = ''
+      for (var i = 0; i < 3; i++) w += (m >> i) & 1 ? apply(sliceS, 'DOC', [i, i + 1]) : apply(sliceS, 'doc', [i, i + 1])
+      DOCS[m] = w
+    }
+  })()
+  var nameBefore = function (c) { return isWs(c) || c === 47 || c === 34 || c === 39 }
+  var nameAfter = function (c) { return c !== c || isWs(c) || c === 47 || c === 61 || c === 62 } // (c !== c: NaN, the end of the text)
+  function neuterSrcdoc(v) {
+    var s = v
+    for (var k = 0; k < 8; k++) {
+      var key = DOCS[k], from = 0, last = 0, out = '', any = false
+      for (;;) {
+        var p = apply(idxOf, s, [key, from])
+        if (p < 0) break
+        from = p + 3
+        if (p < 4 || !foldIs(s, p - 3, 'src') || !nameBefore(apply(cca, s, [p - 4])) || !nameAfter(apply(cca, s, [p + 3]))) continue
+        out += apply(sliceS, s, [last, p - 3]) + 'x-'
+        last = p - 3
+        any = true
+      }
+      if (any) s = out + apply(sliceS, s, [last])
+    }
+    return s
+  }
+  function inject(v) {
+    if (SRC.length === 0) return ''
+    var s = neuterSrcdoc(neuterShadow(rewriteLinks(v))), i = afterDoctype(s)
+    return apply(sliceS, s, [0, i]) + '<script>' + SRC + CLOSE + 'script>' + apply(sliceS, s, [i])
+  }
+  function police(el) {
+    try {
+      if (apply(nodeTypeOf, el, []) !== 1 || apply(localNameOf, el, []) !== 'iframe' || apply(nsOf, el, []) !== XHTML) return
+      var v = apply(getAttr, el, ['srcdoc'])
+      var xv = apply(getAttr, el, [XSD]) // a frame the parser made from renamed markup (neuterSrcdoc): the value moves to srcdoc, through inject
+      if (xv !== null) { apply(rmAttr, el, [XSD]); if (v === null) v = xv }
+      if (v === null || apply(wmGet, last, [el]) === v) return
+      var nv = inject(v)
+      apply(wmSet, last, [el, nv])
+      apply(setAttr, el, ['srcdoc', nv])
+    } catch (x) {
+      try { apply(setAttr, el, ['srcdoc', '']) } catch (y) { /* nothing more to do */ }
+    }
+  }
+  function scan(n) {
+    var t = apply(nodeTypeOf, n, [])
+    if (t !== 1 && t !== 11) return
+    if (t === 1) police(n)
+    var q = apply(t === 1 ? qsaEl : qsaFrag, n, ['iframe'])
+    for (var i = apply(listLen, q, []) - 1; i >= 0; i--) police(apply(listItem, q, [i]))
+  }
+  var observer = new MO(function (recs) {
+    for (var i = 0; i < recs.length; i++) {
+      var r = recs[i]
+      if (apply(recType, r, []) === 'attributes') { if (apply(recAttr, r, []) === 'srcdoc') police(apply(recTarget, r, [])) }
+      else {
+        var added = apply(recAdded, r, [])
+        for (var j = apply(listLen, added, []) - 1; j >= 0; j--) scan(apply(listItem, added, [j]))
+      }
+    }
+  })
+  var docOpts = nul(null)
+  docOpts.childList = true
+  docOpts.subtree = true
+  docOpts.attributes = true
+  docOpts.attributeFilter = ['srcdoc'] // read once, now, while Array iteration is still the browser's own
+  apply(moObserve, observer, [document, docOpts])
+  var rootOpts = nul(null) // roots made later: no attributeFilter (a sequence is read through Array iteration, which output code can change); the callback filters by name
+  rootOpts.childList = true
+  rootOpts.subtree = true
+  rootOpts.attributes = true
+  var watch = function (root) { apply(moObserve, observer, [root, rootOpts]) }
+  // every shadow root is watched, and none is clonable (a clone would carry an unwatched root); declarative roots (the parser makes them in setHTMLUnsafe and
+  // parseHTMLUnsafe only) are not made at all: those two go through innerHTML / DOMParser, which do not make shadow roots
+  lock(Element.prototype, 'attachShadow', function (o) { return function attachShadow(init) {
+    var m, df, sa
+    if (init !== undefined && init !== null) { m = init.mode; df = init.delegatesFocus; sa = init.slotAssignment }
+    var clean = nul(null) // never clonable, never serializable: no inherited key can switch that on
+    clean.mode = m === undefined ? m : S(m)
+    if (df !== undefined) clean.delegatesFocus = !!df
+    if (sa !== undefined) clean.slotAssignment = S(sa)
+    var r = apply(o, this, [clean])
+    watch(r)
+    return r
+  } })
+  // setHTMLUnsafe and setHTML (a custom sanitizer can allow link elements; setHTML is not a Trusted Types sink) take the innerHTML path, which makes no
+  // declarative shadow root; the string is rewritten here as well (so a browser without Trusted Types is covered for these four calls)
+  // a missing innerHTML setter does not leave the native open: the call throws (the build check asserts both setters exist in every browser)
+  var noSetter = function () { throw new TE('wmn: no innerHTML setter') }
+  var viaInner = function (setter) { var set = setter || noSetter; return function () { return function setHTML(h) { apply(set, this, [rewriteLinks(h)]) } } }
+  lock(Element.prototype, 'setHTMLUnsafe', viaInner(innerSetEl)); lock(Element.prototype, 'setHTML', viaInner(innerSetEl))
+  if (self.ShadowRoot) { lock(ShadowRoot.prototype, 'setHTMLUnsafe', viaInner(innerSetShadow)); lock(ShadowRoot.prototype, 'setHTML', viaInner(innerSetShadow)) }
+  var viaParser = function () { return function parseHTMLUnsafe(h) { return stripDoc(apply(parseNative, new DP(), [rewriteLinks(h), 'text/html'])) } }
+  lock(Document, 'parseHTMLUnsafe', viaParser)
+  lock(Document, 'parseHTML', viaParser)
+  // ---- the marker the bootstrap waits for: the three WebRTC names are gone AND there is a guard text to give to nested documents (else the frame never starts)
+  try {
+    if (typeof self.RTCPeerConnection === 'undefined' && typeof self.webkitRTCPeerConnection === 'undefined' && typeof self.mozRTCPeerConnection === 'undefined' && SRC.length > 0) {
+      def(self, '__wmnGuard', { value: true, configurable: true, enumerable: false, writable: false })
+    }
+  } catch (x) { /* no marker: the bootstrap refuses to start */ }
+})()
+;
+</script>
+<script>if (self.origin !== "null") throw new Error("an output frame runs only in a sandboxed frame");
+// Generated by packages/design/build.ts from tokens/*.json. Do not edit; run `bun run build` in packages/design.
+// Template of generated/frame-theme.js: the theme runtime of an output frame (docs/design-system.md section 6).
+// The output origin serves it as /lib/wmn-frame-theme.js and frame.html loads it before its bootstrap, so it runs
+// before any output code. The build fills in the markers below.
+//
+//  - Puts the self-hosted font faces (served by the output origin under /lib/fonts/, CSP `font-src 'self'`) and the
+//    frame's base styles into the document. The base styles apply only once a theme was applied
+//    (`html[data-wmn-theme]`), so a frame that is never sent a theme looks as it did before.
+//  - Hands the bootstrap one function, apply(msg), through self.__wmnFrameTheme (the bootstrap takes it and deletes
+//    the global before output code runs). apply validates the message (frame-validate.js) and writes the values as
+//    custom properties on the frame's root, sets color-scheme, then tells chart renderers.
+//  - Gives output code a read-only helper, self.__wmnTheme: current(), get(name), vega(), plotlyLayout(layout),
+//    onChange(fn). wmn's chart templates use it; an output may too. No callback or code crosses from the app: only
+//    validated strings.
+(() => {
+  const SPEC = {"themes":["light","dark"],"types":{"--wmn-color-surface":"color","--wmn-color-surface-container-lowest":"color","--wmn-color-surface-container":"color","--wmn-color-surface-container-high":"color","--wmn-color-on-surface":"color","--wmn-color-on-surface-variant":"color","--wmn-color-outline":"color","--wmn-color-outline-variant":"color","--wmn-color-primary":"color","--wmn-color-on-primary":"color","--wmn-color-secondary":"color","--wmn-color-tertiary":"color","--wmn-color-error":"color","--wmn-color-warning":"color","--wmn-color-output-bg":"color","--wmn-color-code-bg":"color","--wmn-color-code-text":"color","--wmn-color-syntax-keyword":"color","--wmn-color-syntax-string":"color","--wmn-color-syntax-number":"color","--wmn-color-syntax-comment":"color","--wmn-color-syntax-function":"color","--wmn-color-syntax-variable":"color","--wmn-color-syntax-type":"color","--wmn-color-syntax-operator":"color","--wmn-color-syntax-punctuation":"color","--wmn-color-chart-1":"color","--wmn-color-chart-2":"color","--wmn-color-chart-3":"color","--wmn-color-chart-4":"color","--wmn-color-chart-5":"color","--wmn-color-chart-6":"color","--wmn-color-chart-7":"color","--wmn-color-chart-8":"color","--wmn-color-chart-grid":"color","--wmn-color-chart-axis":"color","--wmn-color-chart-label":"color","--wmn-color-chart-title":"color","--wmn-font-display":"fontFamily","--wmn-font-text":"fontFamily","--wmn-font-code":"fontFamily","--wmn-text-body-md-size":"dimension","--wmn-text-body-md-line":"dimension","--wmn-text-body-sm-size":"dimension","--wmn-text-body-sm-line":"dimension","--wmn-text-label-md-size":"dimension","--wmn-text-code-block-size":"dimension","--wmn-text-code-block-line":"dimension","--wmn-text-headline-sm-size":"dimension","--wmn-text-headline-sm-line":"dimension","--wmn-radius":"dimension","--wmn-radius-lg":"dimension"}};
+  const CSS = "html[data-wmn-theme] {\n  background-color: var(--wmn-color-output-bg);\n  color: var(--wmn-color-on-surface);\n  font-family: var(--wmn-font-text);\n  font-size: var(--wmn-text-body-md-size);\n  line-height: var(--wmn-text-body-md-line);\n}\nhtml[data-wmn-theme] :where(h1, h2, h3, h4) {\n  font-family: var(--wmn-font-display);\n  font-size: var(--wmn-text-headline-sm-size);\n  line-height: var(--wmn-text-headline-sm-line);\n  font-weight: 500;\n}\nhtml[data-wmn-theme] :where(code, pre, kbd, samp) {\n  font-family: var(--wmn-font-code);\n  font-size: var(--wmn-text-code-block-size);\n}\nhtml[data-wmn-theme] :where(body > svg:only-child) { display: block; }\nhtml[data-wmn-theme] :where(a) { color: var(--wmn-color-primary); }\nhtml[data-wmn-theme] :where(table) { border-collapse: collapse; font-size: var(--wmn-text-body-sm-size); }\nhtml[data-wmn-theme] :where(th, td) { border: 1px solid var(--wmn-color-outline-variant); padding: 0.25rem 0.5rem; }\nhtml[data-wmn-theme] :where(th) { background-color: var(--wmn-color-surface-container-high); }\n";
+  // Validation of the theme message an output frame receives over its MessagePort (docs/design-system.md
+// section 6). One source for both sides: the app's output host checks a message before sending it, and the frame
+// bootstrap (generated/frame-theme.js embeds this file) checks it again before writing anything. Plain JS with no
+// imports so it can be embedded in the frame's classic script.
+//
+// spec = { themes: ['light', 'dark'], types: { '--wmn-color-surface': 'color', ... } }  (generated/frame-theme.json)
+// msg  = { t: 'theme', theme: 'light' | 'dark', vars: { '--wmn-…': value, ... }, n?: number }
+//
+// Returns null when the message is acceptable, else a short reason. Every key of `types` must be present and no
+// other key; every value is a short string of its key's kind; nothing that CSS could read as a URL, a function, a
+// rule, a comment or another declaration gets through.
+function validateTheme(msg, spec) {
+  const hasOwn = Object.prototype.hasOwnProperty;
+  if (!msg || typeof msg !== "object" || Array.isArray(msg)) return "shape";
+  const top = Object.keys(msg);
+  for (let i = 0; i < top.length; i++) {
+    if (top[i] !== "t" && top[i] !== "theme" && top[i] !== "vars" && top[i] !== "n")
+      return `shape:${String(top[i]).slice(0, 40)}`;
+  }
+  if (msg.t !== "theme") return "shape:t";
+  if (hasOwn.call(msg, "n") && !(Number.isSafeInteger(msg.n) && msg.n >= 0)) return "shape:n";
+  if (spec.themes.indexOf(msg.theme) < 0) return "theme";
+  const vars = msg.vars;
+  if (!vars || typeof vars !== "object" || Array.isArray(vars)) return "vars";
+  const proto = Object.getPrototypeOf(vars);
+  if (proto !== Object.prototype && proto !== null) return "vars";
+  const types = spec.types;
+  const want = Object.keys(types);
+  const keys = Object.keys(vars);
+  // Counted before anything is looked at: a message with 10,000 keys costs one Object.keys and is refused.
+  if (keys.length > want.length) return "too-many-keys";
+  for (let k = 0; k < keys.length; k++) {
+    if (!hasOwn.call(types, keys[k])) return `unknown-key:${String(keys[k]).slice(0, 60)}`;
+  }
+  if (keys.length !== want.length) return "missing-key";
+  for (let j = 0; j < want.length; j++) {
+    const name = want[j];
+    const why = checkValue(types[name], vars[name]);
+    if (why) return `${why}:${name}`;
+  }
+  return null;
+}
+
+const FAMILY = '(?:"[A-Za-z0-9 -]{1,64}"|[A-Za-z][A-Za-z0-9-]{0,63})';
+const CHECKS = {
+  color: /^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/,
+  dimension: /^(?:0|-?\d{1,4}(?:\.\d{1,5})?(?:px|rem|em))$/,
+  fontWeight: /^[1-9]00$/,
+  number: /^\d{1,4}(?:\.\d{1,4})?$/,
+  fontFamily: new RegExp(`^${FAMILY}(?:, ${FAMILY}){0,9}$`),
+};
+
+function checkValue(type, v) {
+  if (typeof v !== "string") return "value-type";
+  if (v.length > 240) return "value-long";
+  const re = CHECKS[type];
+  if (!re) return "spec";
+  if (!re.test(v)) return "value";
+  return null;
+}
+
+  // Vega-Lite config and plotly layout from the theme's custom properties (docs/design-system.md section 6.3): wmn's
+// own chart renderers style every chart from the tokens, so the output's code never needs to know about themes.
+// One source for both sides: generated/charts.ts holds the result per theme (for the app and published pages), and
+// generated/frame-theme.js embeds this file so a renderer inside an output frame builds the same config from the
+// theme message it was sent. Plain JS, no imports.
+//
+// get(name) returns the value of a `--wmn-…` property ("" when unset).
+function chartConfig(get) {
+  const px = (v) => {
+    const n = parseFloat(v);
+    return /rem$/.test(v) ? n * 16 : n;
+  };
+  const c = (n) => get(`--wmn-color-${n}`);
+  const palette = [];
+  for (let i = 1; i <= 8; i++) palette.push(c(`chart-${i}`));
+  const font = get("--wmn-font-text");
+  const display = get("--wmn-font-display");
+  const size = px(get("--wmn-text-label-md-size"));
+  const axisColors = {
+    gridcolor: c("chart-grid"),
+    linecolor: c("chart-axis"),
+    zerolinecolor: c("chart-axis"),
+    tickcolor: c("chart-axis"),
+    tickfont: { family: font, color: c("chart-label"), size: size },
+    title: { font: { family: font, color: c("chart-title"), size: size } },
+  };
+  return {
+    vega: {
+      background: c("output-bg"),
+      font: font,
+      view: { stroke: null },
+      axis: {
+        domainColor: c("chart-axis"),
+        tickColor: c("chart-axis"),
+        gridColor: c("chart-grid"),
+        labelColor: c("chart-label"),
+        titleColor: c("chart-title"),
+        labelFont: font,
+        titleFont: font,
+        labelFontSize: size,
+        titleFontSize: size,
+        titleFontWeight: 500,
+      },
+      legend: { labelColor: c("chart-label"), titleColor: c("chart-title"), labelFont: font, titleFont: font },
+      title: { color: c("chart-title"), font: display },
+      range: { category: palette },
+      mark: { color: palette[0] },
+    },
+    plotly: {
+      paper_bgcolor: c("output-bg"),
+      plot_bgcolor: c("output-bg"),
+      colorway: palette,
+      font: { family: font, color: c("chart-label"), size: size },
+      title: { font: { family: display, color: c("chart-title") } },
+      legend: { font: { family: font, color: c("chart-label") } },
+      axis: axisColors,
+    },
+  };
+}
+
+// A plotly layout with the theme applied: the output's own layout keys win, every axis it has (xaxis, yaxis2, ...)
+// gets the axis colours.
+function plotlyLayout(theme, layout) {
+  const out = {};
+  let k;
+  for (k in theme) if (k !== "axis") out[k] = theme[k];
+  for (k in layout) {
+    if (!Object.hasOwn(layout, k)) continue;
+    out[k] = layout[k];
+  }
+  const axes = ["xaxis", "yaxis"];
+  for (k in layout) if (/^[xy]axis\d+$/.test(k)) axes.push(k);
+  for (let i = 0; i < axes.length; i++) {
+    const own = layout[axes[i]] || {};
+    const merged = {};
+    for (k in theme.axis) merged[k] = theme.axis[k];
+    for (k in own) merged[k] = own[k];
+    out[axes[i]] = merged;
+  }
+  return out;
+}
+
+  const apply_ = Reflect.apply;
+  const setTimeout_ = self.setTimeout.bind(self);
+  const setProperty = CSSStyleDeclaration.prototype.setProperty;
+  const setAttribute = Element.prototype.setAttribute;
+  const root = document.documentElement;
+  const rootStyle = root.style;
+  let current = null;
+  let lastN = -1;
+  const listeners = [];
+
+  const style = document.createElement("style");
+  style.id = "wmn-frame-theme";
+  style.textContent = CSS;
+  (document.head || root).appendChild(style);
+
+  function apply(msg) {
+    const why = validateTheme(msg, SPEC);
+    if (why) return why;
+    // an older theme than the one applied is refused (the host numbers them)
+    if (typeof msg.n === "number" && msg.n < lastN) return "stale";
+    if (typeof msg.n === "number") lastN = msg.n;
+    const names = Object.keys(SPEC.types);
+    const vars = msg.vars;
+    const copy = {};
+    for (let i = 0; i < names.length; i++) {
+      apply_(setProperty, rootStyle, [names[i], vars[names[i]]]);
+      copy[names[i]] = vars[names[i]];
+    }
+    apply_(setProperty, rootStyle, ["color-scheme", msg.theme]);
+    apply_(setAttribute, root, ["data-wmn-theme", msg.theme]);
+    current = { theme: msg.theme, vars: copy };
+    notifySoon();
+    return null;
+  }
+
+  // Listeners (chart renderers) hear of a change in a task of their own, never inside the port message, and at most
+  // once per NOTIFY_MS (the first change at once, the last one of a burst always): a host switching themes 100 times
+  // must not queue 100 chart redraws. Measured before this: 100 switches 20 ms apart queued a redraw of every chart
+  // per message in the shared output process, pings waited behind them, and the watchdog stopped the HTML frames
+  // that shared that process.
+  const NOTIFY_MS = 250;
+  let lastNotify = -Infinity;
+  let notifyTimer = null;
+  function notifySoon() {
+    if (notifyTimer !== null) return;
+    const wait = Math.max(0, lastNotify + NOTIFY_MS - Date.now());
+    notifyTimer = setTimeout_(() => {
+      notifyTimer = null;
+      lastNotify = Date.now();
+      const fns = listeners.slice();
+      for (let j = 0; j < fns.length; j++) {
+        try {
+          fns[j](current.theme);
+        } catch (_e) {}
+      }
+    }, wait);
+  }
+
+  Object.defineProperty(self, "__wmnFrameTheme", {
+    value: { apply: apply },
+    configurable: true,
+    writable: false,
+    enumerable: false,
+  });
+  const helper = Object.freeze({
+    current: () => (current ? current.theme : null),
+    get: (name) => (current && Object.hasOwn(current.vars, name) ? current.vars[name] : ""),
+    vega: () => (current ? chartConfig(helper.get).vega : undefined),
+    plotlyLayout: (layout) => (current ? plotlyLayout(chartConfig(helper.get).plotly, layout || {}) : layout || {}),
+    onChange: (fn) => {
+      if (typeof fn === "function") listeners.push(fn);
+    },
+  });
+  Object.defineProperty(self, "__wmnTheme", { value: helper, configurable: false, writable: false, enumerable: false });
+})();
+</script>
+<script>if (self.origin !== "null") throw new Error("an output frame runs only in a sandboxed frame");
+// wmn output frame bootstrap. Served from the output origin (a different site from the app) with
+// `Content-Security-Policy: sandbox allow-scripts; ...`, and embedded with sandbox="allow-scripts", so this document
+// has an opaque origin. It holds no secrets: the host sends the output's HTML over a MessagePort and this script
+// inserts it into the document, running its scripts in document order (external scripts are awaited, as a parser
+// would).
+//
+// Protocol (host -> frame, on the port): {t:'ping', n} | {t:'render', html} | {t:'theme', theme, vars, n}
+//           | {t:'view', code, assets, block, values, data, cpu} | {t:'values', values} | {t:'data', name, mime, value}
+//             (library block views, P-E9: an ES module from a pinned package, see startView below)
+//           (frame -> host, on the port): {t:'pong', n, cpu} | {t:'cpu', cpu} | {t:'rendering'} | {t:'size', h}
+//                                         | {t:'done', info}
+//                                         | {t:'set', key, value} | {t:'run', block} | {t:'status', text} (views only)
+//                                         | {t:'themed', n} | {t:'theme-refused', n, why}
+//                                         | {t:'input'} (the reader's own input reached this frame)
+//                                         | {t:'leaving'} (this document is being unloaded: it navigated)
+// The only window-level messages are {wmn:'ready'} (frame -> parent) and {wmn:'init'} + port (parent -> frame).
+(function () {
+  'use strict'
+  // The frame guard (the first script) sets this marker only if the WebRTC constructors are gone and it has a text to give to nested documents. A
+  // frame whose guard did not run to its end never starts: fail closed.
+  if (self.__wmnGuard !== true) throw new Error('wmn frame: the frame guard did not run')
+  delete self.__wmnGuard
+  // Originals first: output code runs in this same global and may replace prototypes or globals afterwards.
+  var apply = Reflect.apply
+  var defineProperty = Object.defineProperty
+  var getOwn = Object.getOwnPropertyDescriptor
+  var addL = EventTarget.prototype.addEventListener
+  var stopImmediate = Event.prototype.stopImmediatePropagation
+  var hasFocus = Document.prototype.hasFocus
+  var setAttr = Element.prototype.setAttribute
+  var setTimeout_ = self.setTimeout
+  var post = MessagePort.prototype.postMessage
+  var doc = document
+  var noop = function () {}
+  var port = null
+  function send(msg) { if (port) apply(post, port, [msg]) }
+  function on(target, type, fn) { apply(addL, target, [type, fn, true]) }
+
+  // The theme runtime (/lib/wmn-frame-theme.js, generated by packages/design; P-E6, D-016) ran just before this
+  // script and left one function here. Taken and removed before any output code runs: only the host's theme
+  // message, over the port, can call it. It validates the message (unknown keys, non-token values, CSS or url() in a
+  // value, oversized messages are refused) and writes the variables on this document's root.
+  var themeApi = null
+  try {
+    themeApi = self.__wmnFrameTheme || null
+    delete self.__wmnFrameTheme
+  } catch (x) {}
+
+  // Session history is shared with the app's tab ("joint session history"). Firefox and WebKit let a sandboxed
+  // cross-site frame traverse it: history.back()/go(-n) here moves the APP back, to an earlier document too
+  // (measured; Chromium blocks it). Output code runs in this realm only (nested frames are sandboxed, so opaque
+  // and cross-origin to it; no popups, no workers), so taking the traversal methods away here, for good, closes
+  // that route. pushState/replaceState would add or edit entries of the tab's history: also removed.
+  function lock(proto, names) {
+    if (!proto) return
+    for (var i = 0; i < names.length; i++) {
+      if (names[i] in proto) defineProperty(proto, names[i], { value: noop, writable: false, configurable: false, enumerable: true })
+    }
+  }
+  lock(self.History && History.prototype, ['back', 'forward', 'go', 'pushState', 'replaceState'])
+  lock(self.Navigation && Navigation.prototype, ['back', 'forward', 'traverseTo'])
+  lock(self, ['back', 'forward']) // old non-standard Window.back()/forward()
+
+  // Worklets (audio, paint) run module code on threads of their own, outside the watchdog's pings and the CPU account;
+  // a worklet module that never returns burns a core for as long as the frame lives (P-E9 review F3, Chromium and
+  // Firefox). Output code gets no worklets: addModule refuses, before any output code runs. (Workers are off by CSP.)
+  var refuseWorklet = function () { return Promise.reject(new DOMException('Worklets are off in wmn outputs', 'NotAllowedError')) }
+  if (self.Worklet && Worklet.prototype && 'addModule' in Worklet.prototype) {
+    defineProperty(Worklet.prototype, 'addModule', { value: refuseWorklet, writable: false, configurable: false, enumerable: true })
+  }
+  if (self.AudioWorklet && AudioWorklet.prototype && Object.prototype.hasOwnProperty.call(AudioWorklet.prototype, 'addModule')) {
+    defineProperty(AudioWorklet.prototype, 'addModule', { value: refuseWorklet, writable: false, configurable: false, enumerable: true })
+  }
+
+  // Download links. Outputs cannot download (no allow-downloads); WebKit turned a click on a blob: download link into a
+  // navigation of the frame, which the app's frame-src (frame.html only since P-E9 review F9) blocks, and the host then
+  // stops the output as "navigated" before its own messages arrive. A click (trusted or from code) on an <a>/<area> with
+  // a download attribute is cancelled here, before any output listener sees it: it does nothing, in every browser.
+  var closest = Element.prototype.closest
+  var preventDefault = Event.prototype.preventDefault
+  on(self, 'click', function (e) {
+    var t = e.target
+    var link = null
+    try { link = t && t.nodeType === 1 ? apply(closest, t, ['a[download],area[download]']) : null } catch (x) {}
+    if (link) apply(preventDefault, e, [])
+  })
+
+  // The lock above lives in this document only. A document the output navigates its frame to (location =
+  // 'data:...', a meta refresh, open(url, '_self'), a link) would have fresh prototypes. Three layers, none of them
+  // here (the Navigation API that could cancel such navigations from this document is off in opaque-origin
+  // documents): the app's CSP frame-src allows its output frames to show frame.html only, so the browser blocks
+  // those navigations; the host drops allow-scripts from the iframe's sandbox once this document is running, so
+  // whatever document does land in the frame runs no script; and this document reports 'leaving' on pagehide, so the
+  // host removes the frame at once (Chromium commits an error page for a blocked navigation, which would otherwise
+  // add an entry to the tab's history).
+  //
+  // document.open(), write() and writeln() on a loaded document would erase every event listener of this document and window, the guards below
+  // included: the frame guard (the first script, C-019k) made all three dead before this script runs, here and in every nested document.
+
+  // CPU accounting (P-E6 review F1). Where frames share the editor's thread (WebKit, Firefox without Fission) the host
+  // cannot tell from its own late timers which frame kept the thread busy, so each frame measures the time its own
+  // callbacks take and reports the total with every pong; the host stops a frame over its CPU budget and excuses the
+  // other frames' late pongs. Every way output code gets called back is wrapped before output code runs: timers,
+  // animation frames, idle callbacks, event listeners and on* handlers, observers. A callback's time runs until the
+  // microtasks it queued have run (a few levels deep: async continuations). Nested calls are counted once. Output
+  // code that deliberately hides work in deeper microtask chains could escape; charts (the outputs that run on the
+  // editor's thread without the reader's opt-in) are wmn's renderers on data and do not.
+  var now_ = performance.now.bind(performance)
+  var queueMicro = self.queueMicrotask.bind(self)
+  var WM = self.WeakMap
+  var cpuMs = 0
+  var taskStart = 0
+  var measuredFns = new WM()
+  function tail(level) {
+    if (level < 16) return queueMicro(function () { tail(level + 1) })
+    var end = now_()
+    var took = end - taskStart
+    cpuMs += took
+    taskStart = 0
+    // a long callback is reported at once (the next pong may wait behind the next one), at most every 250 ms
+    if (took > 100 && end - lastCpuReport > 250) {
+      lastCpuReport = end
+      send({ t: 'cpu', cpu: Math.round(cpuMs) })
+    }
+  }
+  var lastCpuReport = -1e9
+  function measured(fn) {
+    if (typeof fn !== 'function') return fn
+    var w = measuredFns.get(fn)
+    if (w) return w
+    w = function () {
+      if (taskStart) return apply(fn, this, arguments)
+      taskStart = now_() || 1e-9
+      try {
+        return apply(fn, this, arguments)
+      } finally {
+        tail(0)
+      }
+    }
+    measuredFns.set(fn, w)
+    return w
+  }
+  function wrapCallbackArg(owner, name) {
+    var orig = owner && owner[name]
+    if (typeof orig !== 'function') return
+    defineProperty(owner, name, {
+      value: function (cb) {
+        var args = Array.prototype.slice.call(arguments)
+        args[0] = measured(cb)
+        return apply(orig, this, args)
+      },
+      writable: false,
+      configurable: false,
+      enumerable: true,
+    })
+  }
+  // Installed when the host asks for it with the content (only where frames share the editor's thread: elsewhere the
+  // frame's work does not slow the editor, and the wrappers cost Chromium's 100-output load test 16 -> 36-56 ms p95
+  // typing), still before any output code runs.
+  var cpuOn = false
+  function installCpuAccounting() {
+    if (cpuOn) return
+    cpuOn = true
+    wrapCallbackArg(self, 'setTimeout')
+    wrapCallbackArg(self, 'setInterval')
+    wrapCallbackArg(self, 'requestAnimationFrame')
+    wrapCallbackArg(self, 'requestIdleCallback')
+    var observers = ['MutationObserver', 'ResizeObserver', 'IntersectionObserver', 'PerformanceObserver']
+    for (var ob = 0; ob < observers.length; ob++) {
+      (function (Orig) {
+        if (typeof Orig !== 'function') return
+        var Wrapped = function (cb, o) {
+          return new Orig(measured(cb), o)
+        }
+        Wrapped.prototype = Orig.prototype
+        defineProperty(self, Orig.name, { value: Wrapped, writable: false, configurable: false, enumerable: false })
+      })(self[observers[ob]])
+    }
+    // on* handler properties (onclick, onmessage, ...), wherever they are defined
+    var handlerHosts = [self, self.Window && Window.prototype, self.Document && Document.prototype, self.HTMLElement && HTMLElement.prototype,
+      self.SVGElement && SVGElement.prototype, self.MessagePort && MessagePort.prototype, self.EventSource && EventSource.prototype]
+    for (var hh = 0; hh < handlerHosts.length; hh++) {
+      var hostObj = handlerHosts[hh]
+      if (!hostObj) continue
+      var names = Object.getOwnPropertyNames(hostObj)
+      for (var hn = 0; hn < names.length; hn++) {
+        if (names[hn].slice(0, 2) !== 'on' || names[hn] === 'onbeforeunload') continue
+        var dsc = getOwn(hostObj, names[hn])
+        if (!dsc || !dsc.set || !dsc.configurable) continue
+        ;(function (d, n) {
+          defineProperty(hostObj, n, {
+            get: d.get,
+            set: function (v) { apply(d.set, this, [measured(v)]) },
+            configurable: false,
+            enumerable: d.enumerable,
+          })
+        })(dsc, names[hn])
+      }
+    }
+  }
+
+  // Whatever unloads this document (a navigation, or the host removing the frame):
+  // the host hears of it, and output code gets no unload-time handlers. Removing a frame runs them synchronously on
+  // the remover's thread in WebKit (the editor's thread: a spinning pagehide froze it), and in every browser they run
+  // after the host stopped listening. Registered first and capturing at the window, so they see every such event
+  // before any listener or on* handler of the output and end it there.
+  var unloadEvents = ['pagehide', 'unload', 'pageswap']
+  for (var u = 0; u < unloadEvents.length; u++) {
+    on(self, unloadEvents[u], function (e) {
+      if (e.type === 'pagehide') send({ t: 'leaving' })
+      apply(stopImmediate, e, [])
+    })
+  }
+  // Firefox blocks a navigation the app's CSP refuses (data:, a meta refresh, open(url, '_self')) before anything
+  // commits: this document is not unloaded, so no pagehide comes and the iframe fires no load, and the only other trace
+  // is a violation reported to the app, which names no frame. It does fire beforeunload here first, so Firefox reports
+  // 'leaving' from that. Only Firefox has the handler: in Chromium a frame with a beforeunload handler waits for it
+  // (see below) when the host tears it down; there the blocked navigation commits an error page and pagehide reports.
+  // The host has closed the port of a frame it removes itself, so this reaches nothing then.
+  if ('mozInnerScreenX' in self) on(self, 'beforeunload', function () { send({ t: 'leaving' }) })
+  // beforeunload is different: a frame with a beforeunload handler must be asked before it may be navigated away,
+  // and a frame that spins never answers; measured in Chromium, the host's teardown (navigate to about:blank) of a
+  // spinning frame with one waited ~10 s with a core busy, without one ~1 s. So there is none here, and output code
+  // cannot add one (it could not show its prompt anyway: no allow-modals).
+  var addOrig = addL
+  defineProperty(EventTarget.prototype, 'addEventListener', {
+    value: function (type) {
+      if (this === self && String(type).toLowerCase() === 'beforeunload') return
+      if (!cpuOn) return apply(addOrig, this, arguments)
+      var args = Array.prototype.slice.call(arguments)
+      args[1] = measured(args[1])
+      return apply(addOrig, this, args)
+    },
+    writable: false,
+    configurable: false,
+    enumerable: true,
+  })
+  var removeOrig = EventTarget.prototype.removeEventListener
+  defineProperty(EventTarget.prototype, 'removeEventListener', {
+    value: function () {
+      var args = Array.prototype.slice.call(arguments)
+      if (typeof args[1] === 'function') args[1] = measuredFns.get(args[1]) || args[1]
+      return apply(removeOrig, this, args)
+    },
+    writable: false,
+    configurable: false,
+    enumerable: true,
+  })
+  var inertHandler = { get: function () { return null }, set: noop, configurable: false, enumerable: true }
+  var handlerOwners = [self, self.HTMLBodyElement && HTMLBodyElement.prototype, self.HTMLFrameSetElement && HTMLFrameSetElement.prototype]
+  for (var h = 0; h < handlerOwners.length; h++) {
+    try { if (handlerOwners[h]) defineProperty(handlerOwners[h], 'onbeforeunload', inertHandler) } catch (x) {}
+  }
+  on(self, 'visibilitychange', function (e) { if (doc.visibilityState === 'hidden') apply(stopImmediate, e, []) })
+
+  // Keyboard focus. An output may take focus only while it has it already (the reader clicked or tabbed into it)
+  // or while handling the reader's own input event; otherwise focus(), select(), dialog show/showModal (focusing
+  // steps), popovers and window.focus() do nothing, so an output cannot pull the caret away from the editor and read
+  // keys typed for it. (Autofocus in a cross-origin frame is already ignored by the browsers.) The host also returns
+  // focus to the app if an output ends up focused without the reader's input (wmn-output-host.js, focus guard).
+  var userTurn = false
+  var lastInputSent = 0
+  var seen = {} // when each kind of trusted input last reached this document (the input bridge replays only what did not)
+  function endTurn() { userTurn = false }
+  function onUser(e) {
+    if (!e.isTrusted) return // isTrusted cannot be forged: synthetic events from output code are false
+    seen[e.type] = Date.now()
+    userTurn = true
+    apply(setTimeout_, self, [endTurn, 0])
+    var n = Date.now()
+    // the reader's own Escape in this frame: the page that holds it may close what the frame sits in (a dialog), as its keys never reach the page from here
+    if (e.type === 'keydown' && e.key === 'Escape') { lastInputSent = n; return send({ t: 'input', escape: true }) }
+    if (n - lastInputSent > 200) { lastInputSent = n; send({ t: 'input' }) }
+  }
+  var userEvents = ['pointerdown', 'pointerup', 'mousedown', 'touchstart', 'keydown', 'keyup', 'click']
+  for (var k = 0; k < userEvents.length; k++) on(self, userEvents[k], onUser)
+  function mayFocus() {
+    try { return userTurn || apply(hasFocus, doc, []) } catch (x) { return false }
+  }
+  function guard(proto, name, otherwise) {
+    var d = proto && getOwn(proto, name)
+    if (!d || typeof d.value !== 'function') return
+    var orig = d.value
+    defineProperty(proto, name, {
+      value: function () {
+        if (mayFocus()) return apply(orig, this, arguments)
+        if (otherwise) return otherwise(this)
+      },
+      writable: false,
+      configurable: false,
+      enumerable: d.enumerable,
+    })
+  }
+  guard(self.HTMLElement && HTMLElement.prototype, 'focus')
+  guard(self.SVGElement && SVGElement.prototype, 'focus')
+  guard(self.MathMLElement && MathMLElement.prototype, 'focus')
+  guard(self, 'focus')
+  guard(self.Window && Window.prototype, 'focus')
+  guard(self.HTMLInputElement && HTMLInputElement.prototype, 'select')
+  guard(self.HTMLTextAreaElement && HTMLTextAreaElement.prototype, 'select')
+  // Not focused: a dialog still opens, without the focusing steps (non-modal).
+  var openDialog = function (d) { apply(setAttr, d, ['open', '']) }
+  guard(self.HTMLDialogElement && HTMLDialogElement.prototype, 'show', openDialog)
+  guard(self.HTMLDialogElement && HTMLDialogElement.prototype, 'showModal', openDialog)
+  guard(self.HTMLElement && HTMLElement.prototype, 'showPopover')
+  guard(self.HTMLElement && HTMLElement.prototype, 'togglePopover')
+
+  // Clipboard. The iframe's allow list and the Permissions-Policy header turn clipboard writes off, but measured:
+  // Chromium still runs document.execCommand('copy') after a click in the output (with the output's own copy handler
+  // choosing the data) and WebKit resolves navigator.clipboard.writeText(). An output must not replace what the reader
+  // has on the clipboard: those calls are refused here, and copy/cut events are not shown to output code (a copy the
+  // reader makes of selected output text still copies that text, as the browser does by default).
+  var notAllowed = function () { return Promise.reject(new DOMException('Clipboard is off in wmn outputs', 'NotAllowedError')) }
+  var CB = self.Clipboard && Clipboard.prototype
+  if (CB) {
+    var cbNames = ['write', 'writeText', 'read', 'readText']
+    for (var c = 0; c < cbNames.length; c++) {
+      if (cbNames[c] in CB) defineProperty(CB, cbNames[c], { value: notAllowed, writable: false, configurable: false, enumerable: true })
+    }
+  }
+  var execCommand = Document.prototype.execCommand
+  if (execCommand) {
+    defineProperty(Document.prototype, 'execCommand', {
+      value: function (cmd) {
+        var name = String(cmd).toLowerCase()
+        if (name === 'copy' || name === 'cut' || name === 'paste') return false
+        return apply(execCommand, this, arguments)
+      },
+      writable: false,
+      configurable: false,
+      enumerable: true,
+    })
+  }
+  on(self, 'copy', function (e) { apply(stopImmediate, e, []) })
+  on(self, 'cut', function (e) { apply(stopImmediate, e, []) })
+
+  // Input bridge. Where the browser hands the reader's pointer and keys to the app's <iframe> element instead of this
+  // document (Firefox, for a cross-site frame on a cross-origin isolated page), the host sends them down the port and
+  // they are replayed here: the pointer events, a click, focus, the text a key types, the keys that edit it, a slider's
+  // value. They are events of this document made by this script (isTrusted false), so they count as the reader's turn
+  // only here. A replay of input this document already got as real events (seen) is dropped.
+  var ME = self.MouseEvent, PE = self.PointerEvent || self.MouseEvent, KE = self.KeyboardEvent, IE = self.InputEvent, EV = self.Event
+  var dispatch = EventTarget.prototype.dispatchEvent
+  var fromPoint = Document.prototype.elementFromPoint
+  var rectOf = Element.prototype.getBoundingClientRect
+  var elClick = HTMLElement.prototype.click
+  var elFocus = HTMLElement.prototype.focus
+  var valueSet = (getOwn(HTMLInputElement.prototype, 'value') || {}).set
+  var getSel = self.getSelection
+  var downEl = null
+  var rangeMoved = null
+  var edited = null
+  function turn() { userTurn = true; apply(setTimeout_, self, [endTurn, 0]) }
+  function fresh(type) { return Date.now() - (seen[type] || 0) < 500 }
+  function fire(el, C, type, init) {
+    try { return apply(dispatch, el, [new C(type, init)]) } catch (x) { return true }
+  }
+  function mouseInit(d, buttons) {
+    return { bubbles: true, cancelable: true, composed: true, view: self, clientX: d.x, clientY: d.y, screenX: d.x, screenY: d.y,
+      button: 0, buttons: buttons, shiftKey: !!d.shift, ctrlKey: !!d.ctrl, altKey: !!d.alt, metaKey: !!d.meta, pointerId: 1, pointerType: 'mouse', isPrimary: true, detail: 1 }
+  }
+  var TEXT_TYPES = { text: 1, search: 1, url: 1, tel: 1, password: 1, email: 1, number: 1, '': 1 }
+  function isText(el) {
+    if (!el || el.nodeType !== 1 || el.disabled || el.readOnly) return false
+    if (el.tagName === 'TEXTAREA') return true
+    return el.tagName === 'INPUT' && TEXT_TYPES[String(el.type)] === 1
+  }
+  function isRange(el) { return !!el && el.nodeType === 1 && el.tagName === 'INPUT' && el.type === 'range' && !el.disabled }
+  function setRange(el, value) {
+    var min = parseFloat(el.min); if (!isFinite(min)) min = 0
+    var max = parseFloat(el.max); if (!isFinite(max)) max = 100
+    var step = parseFloat(el.step); if (!isFinite(step) || step <= 0) step = 1
+    var v = Math.min(max, Math.max(min, min + Math.round((value - min) / step) * step))
+    if (String(v) === el.value || !valueSet) return
+    apply(valueSet, el, [String(v)])
+    rangeMoved = el
+    fire(el, EV, 'input', { bubbles: true, composed: true })
+  }
+  function rangeAt(el, x) {
+    var r = apply(rectOf, el, [])
+    var min = parseFloat(el.min); if (!isFinite(min)) min = 0
+    var max = parseFloat(el.max); if (!isFinite(max)) max = 100
+    setRange(el, min + Math.min(1, Math.max(0, (x - r.left) / (r.width || 1))) * (max - min))
+  }
+  function endRange() {
+    if (!rangeMoved) return
+    var el = rangeMoved
+    rangeMoved = null
+    fire(el, EV, 'change', { bubbles: true })
+  }
+  function focusable(el) {
+    for (var n = el; n && n.nodeType === 1; n = n.parentElement) {
+      if (n.disabled) return null
+      var tag = n.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'BUTTON' || tag === 'SUMMARY') return n
+      if (tag === 'A' && n.hasAttribute('href')) return n
+      if (n.hasAttribute('tabindex') || n.isContentEditable) return n
+    }
+    return null
+  }
+  function placeCaret(el, x, y) {
+    if (!isText(el) || typeof el.setSelectionRange !== 'function') return
+    var at = el.value.length
+    try {
+      var cp = doc.caretPositionFromPoint && doc.caretPositionFromPoint(x, y)
+      if (cp && cp.offsetNode === el && typeof cp.offset === 'number') at = cp.offset
+    } catch (e) { at = el.value.length } // no caret position here: the end
+    try { el.setSelectionRange(at, at) } catch (e) { return } // a type without a selection (number)
+  }
+  function pointerBridge(d) {
+    if (d.k === 'down') {
+      downEl = null
+      if (fresh('pointerdown') || fresh('mousedown')) return
+      var el = apply(fromPoint, doc, [d.x, d.y]) || doc.body
+      if (!el) return
+      downEl = el
+      turn()
+      fire(el, PE, 'pointerdown', mouseInit(d, 1))
+      if (fire(el, ME, 'mousedown', mouseInit(d, 1))) {
+        var f = focusable(el)
+        if (f) {
+          try { apply(elFocus, f, []) } catch (e) { f = null }
+          placeCaret(f, d.x, d.y)
+        } else if (doc.activeElement && doc.activeElement !== doc.body) {
+          try { doc.activeElement.blur() } catch (e) { downEl = null }
+        }
+        if (isRange(el)) rangeAt(el, d.x)
+      }
+    } else if (d.k === 'move') {
+      if (!downEl) return
+      turn()
+      var over = apply(fromPoint, doc, [d.x, d.y]) || downEl
+      if (isRange(downEl)) rangeAt(downEl, d.x)
+      fire(over, PE, 'pointermove', mouseInit(d, 1))
+      fire(over, ME, 'mousemove', mouseInit(d, 1))
+    } else if (d.k === 'up') {
+      var start = downEl
+      downEl = null
+      if (!start) return
+      turn()
+      var up = apply(fromPoint, doc, [d.x, d.y]) || start
+      fire(up, PE, 'pointerup', mouseInit(d, 0))
+      fire(up, ME, 'mouseup', mouseInit(d, 0))
+      endRange()
+      // the click goes to the nearest element that holds both ends of the press
+      var top = start
+      while (top && !(top.contains && apply(Node.prototype.contains, top, [up]))) top = top.parentNode
+      if (top && top.nodeType === 1) fire(top, ME, 'click', mouseInit(d, 0))
+    } else {
+      downEl = null
+      endRange()
+    }
+  }
+  function edit(cmd, arg) { try { return apply(execCommand, doc, [cmd, false, arg]) } catch (e) { return false } }
+  function insertText(el, text) {
+    if (edit('insertText', text)) { edited = el; return }
+    // the browser's editing command refused: put the text in by hand, with the events a typed character makes
+    if (typeof el.setRangeText !== 'function') return
+    var data = { bubbles: true, composed: true, data: text, inputType: 'insertText' }
+    fire(el, IE, 'beforeinput', { bubbles: true, cancelable: true, composed: true, data: text, inputType: 'insertText' })
+    el.setRangeText(text, el.selectionStart, el.selectionEnd, 'end')
+    fire(el, IE, 'input', data)
+    edited = el
+  }
+  function moveCaret(el, d) {
+    var len = el.value.length, a = el.selectionStart, b = el.selectionEnd
+    var back = el.selectionDirection === 'backward'
+    var at = back ? a : b
+    var to = at
+    if (d.key === 'ArrowLeft') to = !d.shift && a !== b ? a : Math.max(0, at - 1)
+    else if (d.key === 'ArrowRight') to = !d.shift && a !== b ? b : Math.min(len, at + 1)
+    else if (d.key === 'Home' || d.key === 'ArrowUp') to = 0
+    else to = len
+    if (!d.shift) return el.setSelectionRange(to, to)
+    var anchor = back ? b : a
+    el.setSelectionRange(Math.min(anchor, to), Math.max(anchor, to), to < anchor ? 'backward' : 'forward')
+  }
+  function moveRange(el, d) {
+    var min = parseFloat(el.min); if (!isFinite(min)) min = 0
+    var max = parseFloat(el.max); if (!isFinite(max)) max = 100
+    var step = parseFloat(el.step); if (!isFinite(step) || step <= 0) step = 1
+    var v = parseFloat(el.value)
+    if (d.key === 'ArrowRight' || d.key === 'ArrowUp') v += step
+    else if (d.key === 'ArrowLeft' || d.key === 'ArrowDown') v -= step
+    else if (d.key === 'PageUp') v += step * 10
+    else if (d.key === 'PageDown') v -= step * 10
+    else if (d.key === 'Home') v = min
+    else if (d.key === 'End') v = max
+    else return false
+    setRange(el, v)
+    endRange()
+    return true
+  }
+  function moveSelect(el, d) {
+    var i = el.selectedIndex
+    if (d.key === 'ArrowDown') i++
+    else if (d.key === 'ArrowUp') i--
+    else if (d.key === 'Home') i = 0
+    else if (d.key === 'End') i = el.options.length - 1
+    else return
+    if (i < 0 || i >= el.options.length || i === el.selectedIndex || el.options[i].disabled) return
+    el.selectedIndex = i
+    fire(el, EV, 'input', { bubbles: true, composed: true })
+    fire(el, EV, 'change', { bubbles: true })
+  }
+  var CLICK_ON_ENTER = { BUTTON: 1, A: 1, SUMMARY: 1 }
+  function keyBridge(d) {
+    if (fresh(d.k === 'down' ? 'keydown' : 'keyup')) return
+    var el = doc.activeElement
+    if (!el || el === doc.documentElement) el = doc.body
+    if (!el) return
+    turn()
+    var init = { key: d.key, code: d.code, bubbles: true, cancelable: true, composed: true, view: self,
+      shiftKey: !!d.shift, ctrlKey: !!d.ctrl, altKey: !!d.alt, metaKey: !!d.meta, repeat: !!d.repeat }
+    var tag = el.tagName
+    if (d.k === 'up') {
+      if (!fire(el, KE, 'keyup', init)) return
+      var box = tag === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio' || el.type === 'button' || el.type === 'submit' || el.type === 'reset')
+      if (d.key === ' ' && (tag === 'BUTTON' || tag === 'SUMMARY' || box) && !el.disabled) apply(elClick, el, [])
+      return
+    }
+    if (!fire(el, KE, 'keydown', init)) return
+    var one = d.key.length === 1
+    var plain = !d.ctrl && !d.meta
+    if (one && plain) {
+      var press = { key: d.key, code: d.code, charCode: d.key.charCodeAt(0), bubbles: true, cancelable: true, composed: true, view: self, shiftKey: !!d.shift, altKey: !!d.alt }
+      if (!fire(el, KE, 'keypress', press)) return
+    }
+    var editable = isText(el) || (el.isContentEditable && el.tagName !== 'INPUT')
+    if (isRange(el)) { moveRange(el, d); return }
+    if (tag === 'SELECT') { if (plain) moveSelect(el, d); return }
+    if (!d.ctrl && !d.meta && d.key === 'Enter' && (CLICK_ON_ENTER[tag] === 1 && (tag !== 'A' || el.hasAttribute('href'))) && !el.disabled) { apply(elClick, el, []); return }
+    if (!editable) return
+    if (d.meta || d.ctrl) {
+      if (String(d.key).toLowerCase() === 'a') { if (isText(el)) el.select(); else { var sel = getSel(); if (sel) sel.selectAllChildren(el) } }
+      return
+    }
+    if (one) return insertText(el, d.key)
+    if (d.key === 'Backspace') { if (edit('delete')) edited = el; return }
+    if (d.key === 'Delete') { if (edit('forwardDelete')) edited = el; return }
+    if (d.key === 'Enter') {
+      if (el.tagName === 'TEXTAREA') return insertText(el, '\n')
+      if (el.tagName === 'INPUT') {
+        if (edited === el) { edited = null; fire(el, EV, 'change', { bubbles: true }) }
+        return
+      }
+      edit('insertParagraph')
+      return
+    }
+    if (d.key === 'ArrowLeft' || d.key === 'ArrowRight' || d.key === 'Home' || d.key === 'End' || d.key === 'ArrowUp' || d.key === 'ArrowDown') {
+      if (isText(el)) return moveCaret(el, d.key === 'ArrowDown' ? { key: 'End', shift: d.shift } : d)
+      var s = getSel()
+      if (!s || typeof s.modify !== 'function') return
+      var how = d.shift ? 'extend' : 'move'
+      var dir = d.key === 'ArrowLeft' || d.key === 'ArrowUp' || d.key === 'Home' ? 'backward' : 'forward'
+      var by = d.key === 'Home' || d.key === 'End' ? 'lineboundary' : d.key === 'ArrowUp' || d.key === 'ArrowDown' ? 'line' : 'character'
+      s.modify(how, dir, by)
+    }
+  }
+
+  var RO = self.ResizeObserver
+  var port = null
+  var rendered = false
+  function send(msg) { if (port) apply(post, port, [msg]) }
+  function height() {
+    var d = document.documentElement, b = document.body
+    var sh = Math.max(d ? d.scrollHeight : 0, b ? b.scrollHeight : 0)
+    // The document's scrollHeight is never below the frame's own height, so a frame that had been tall (fonts not yet in, a row that wrapped) never
+    // got shorter again. Content taller than the frame is measured by scrollHeight; content that fits is measured by the boxes (C-222, D-263).
+    if (!d || sh > d.clientHeight) return sh
+    return Math.max(Math.round(d.getBoundingClientRect().height), b ? b.scrollHeight : 0)
+  }
+  var lastH = -1
+  function reportSize() {
+    var h = height()
+    if (h !== lastH) { lastH = h; send({ t: 'size', h: h }) }
+  }
+  function freshScript(old) {
+    var s = document.createElement('script')
+    for (var i = 0; i < old.attributes.length; i++) s.setAttribute(old.attributes[i].name, old.attributes[i].value)
+    s.text = old.text
+    return s
+  }
+  // Insert the parsed nodes one by one; a <script> is replaced by a fresh element so it runs, and an external one
+  // is awaited before the next node goes in, so inline code after `<script src=lib>` sees the library.
+  function insertInOrder(nodes, parentEl, i, done) {
+    for (; i < nodes.length; i++) {
+      var n = nodes[i]
+      if (n.nodeName === 'SCRIPT') {
+        var s = freshScript(n)
+        if (s.src) {
+          s.onload = s.onerror = function () { insertInOrder(nodes, parentEl, i + 1, done) }
+          parentEl.appendChild(s)
+          return
+        }
+        parentEl.appendChild(s)
+      } else {
+        var inner = n.nodeType === 1 && n.querySelector && n.querySelector('script') ? Array.prototype.slice.call(n.childNodes) : null
+        if (inner) {
+          // An element that contains scripts: insert it empty, then its children in order.
+          var shell = n.cloneNode(false)
+          parentEl.appendChild(shell)
+          insertInOrder(inner, shell, 0, function () { insertInOrder(nodes, parentEl, i + 1, done) })
+          return
+        }
+        parentEl.appendChild(n)
+      }
+    }
+    done()
+  }
+  function render(html) {
+    var range = document.createRange()
+    range.selectNodeContents(document.body)
+    var frag = range.createContextualFragment(html)
+    insertInOrder(Array.prototype.slice.call(frag.childNodes), document.body, 0, function () {
+      if (RO) new RO(reportSize).observe(document.documentElement)
+      reportSize()
+    })
+  }
+  // ---- Library block views (P-E9, D-023) ------------------------------------------------------------------------
+  // A `wmn:use` block's view is one ES module from a pinned package (checked against its sha256 by the app before it
+  // is sent). It runs here like any output: same document, CSP, sandbox, watchdog and CPU account. It is imported from
+  // a blob: URL made in this document (CSP script-src blob:, which adds nothing to what 'unsafe-inline' already
+  // allows), and its default export is called with `api`. The api is the view's only way to the host: each function
+  // sends one message of a fixed type on the port, and the host checks every one (a key the block does not declare,
+  // a value out of range, an unknown block: refused and counted). Values, table data and the theme come in as data.
+  var viewApi = null
+  var viewListeners = { values: [], data: [] }
+  var viewValues = {}
+  var viewData = {}
+  var assetUrls = {}
+  var createObjectURL = URL.createObjectURL
+  var revokeObjectURL = URL.revokeObjectURL
+  var BlobC = self.Blob
+  var freeze = Object.freeze
+  var jsonParse = JSON.parse
+  var jsonStr = JSON.stringify
+  function copy(v) { try { return jsonParse(jsonStr(v === undefined ? null : v)) } catch (x) { return null } }
+  function deliver(kind, arg) {
+    var fns = viewListeners[kind].slice()
+    for (var i = 0; i < fns.length; i++) {
+      (function (fn) { apply(setTimeout_, self, [function () { fn(copy(arg)) }, 0]) })(fns[i])
+    }
+  }
+  var ASSET_TYPES = /^(image\/(svg\+xml|png|jpeg|webp|gif)|text\/(css|plain|csv)|application\/json|font\/woff2)$/
+  function startView(d) {
+    var root = doc.createElement('div')
+    root.id = 'wmn-view'
+    doc.body.appendChild(root)
+    var assets = {}
+    var list = Array.isArray(d.assets) ? d.assets : []
+    for (var i = 0; i < list.length; i++) {
+      var a = list[i]
+      if (a && typeof a.path === 'string' && typeof a.type === 'string' && ASSET_TYPES.test(a.type) && a.bytes instanceof ArrayBuffer) assets[a.path] = a
+    }
+    viewValues = copy(d.values) || {}
+    viewData = copy(d.data) || {}
+    var block = freeze(copy(d.block) || {})
+    viewApi = freeze({
+      root: root,
+      block: block,
+      values: function () { return copy(viewValues) },
+      data: function (name) { return copy(viewData[String(name)]) },
+      dataNames: function () { return Object.keys(viewData) },
+      onValues: function (fn) { if (typeof fn === 'function') viewListeners.values.push(cpuOn ? measured(fn) : fn) },
+      onData: function (fn) { if (typeof fn === 'function') viewListeners.data.push(cpuOn ? measured(fn) : fn) },
+      set: function (key, value) {
+        var v = typeof value === 'number' || typeof value === 'boolean' ? value : String(value).slice(0, 4096)
+        send({ t: 'set', key: String(key).slice(0, 100), value: v })
+      },
+      run: function (id) { send({ t: 'run', block: String(id).slice(0, 100) }) },
+      status: function (text) { send({ t: 'status', text: String(text).slice(0, 2000) }) },
+      done: function (info) { send({ t: 'done', info: copy(info) }) },
+      asset: function (path) {
+        var a = assets[String(path)]
+        if (!a) return null
+        if (!assetUrls[a.path]) {
+          // an SVG asset as a data: URL: an <img> shows it the same, and it is not a URL the view could open as a
+          // document (the app's frame-src allows no data: or blob: navigation)
+          if (a.type === 'image/svg+xml') {
+            var bytes = new Uint8Array(a.bytes), bin = ''
+            for (var i = 0; i < bytes.length; i += 32768) bin += String.fromCharCode.apply(null, Array.prototype.slice.call(bytes.subarray(i, i + 32768)))
+            assetUrls[a.path] = 'data:image/svg+xml;base64,' + btoa(bin)
+          } else assetUrls[a.path] = createObjectURL(new BlobC([a.bytes], { type: a.type }))
+        }
+        return assetUrls[a.path]
+      },
+      assetText: function (path) {
+        var a = assets[String(path)]
+        return a ? new TextDecoder().decode(a.bytes) : null
+      },
+    })
+    var url = createObjectURL(new BlobC([d.code], { type: 'text/javascript' }))
+    import(url).then(function (m) {
+      revokeObjectURL(url)
+      var fn = m && m.default
+      if (typeof fn !== 'function') return send({ t: 'done', info: { error: 'the view module has no default export function' } })
+      ;(cpuOn ? measured(fn) : fn)(viewApi)
+      if (RO) new RO(reportSize).observe(doc.documentElement)
+      reportSize()
+    }, function (e) {
+      revokeObjectURL(url)
+      send({ t: 'done', info: { error: String(e && e.message || e).slice(0, 200) } })
+    })
+  }
+
+  function onPort(e) {
+    var d = e.data
+    if (!d || typeof d !== 'object') return
+    if (d.t === 'ping') send({ t: 'pong', n: d.n, cpu: Math.round(cpuMs) })
+    else if (d.t === 'theme') {
+      var n = typeof d.n === 'number' ? d.n : null
+      var why = themeApi ? themeApi.apply(d) : 'no-theme-runtime'
+      send(why ? { t: 'theme-refused', n: n, why: String(why).slice(0, 80) } : { t: 'themed', n: n })
+    }
+    else if (d.t === 'pointer' && rendered && (d.k === 'down' || d.k === 'move' || d.k === 'up' || d.k === 'cancel') && typeof d.x === 'number' && typeof d.y === 'number' && isFinite(d.x) && isFinite(d.y)) pointerBridge(d)
+    else if (d.t === 'key' && rendered && (d.k === 'down' || d.k === 'up') && typeof d.key === 'string' && d.key.length > 0 && d.key.length <= 32) keyBridge(d)
+    else if (d.t === 'view' && !rendered && typeof d.code === 'string') {
+      rendered = true
+      if (d.cpu === true) installCpuAccounting()
+      send({ t: 'rendering' })
+      self.__wmnDone = function (info) { send({ t: 'done', info: info === undefined ? null : info }) }
+      startView(d)
+    }
+    else if (d.t === 'values' && viewApi && d.values && typeof d.values === 'object') { viewValues = copy(d.values) || {}; deliver('values', viewValues) }
+    else if (d.t === 'data' && viewApi && typeof d.name === 'string') { viewData[d.name] = { mime: String(d.mime), value: copy(d.value) }; deliver('data', { name: d.name, mime: String(d.mime), value: d.value }) }
+    else if (d.t === 'render' && !rendered && typeof d.html === 'string') {
+      rendered = true
+      if (d.cpu === true) installCpuAccounting()
+      send({ t: 'rendering' })
+      // Renderer templates call this when their chart is drawn; output code may call it too (it is only a signal).
+      self.__wmnDone = function (info) { send({ t: 'done', info: info === undefined ? null : info }) }
+      ;(cpuOn ? measured(render) : render)(d.html)
+    }
+  }
+  function onInit(e) {
+    if (port || e.source !== parent || !e.data || e.data.wmn !== 'init' || !e.ports || e.ports.length !== 1) return
+    removeEventListener('message', onInit)
+    port = e.ports[0]
+    port.onmessage = onPort
+  }
+  addEventListener('message', onInit)
+  parent.postMessage({ wmn: 'ready' }, '*')
+})()
+</script>
+</head><body></body></html>

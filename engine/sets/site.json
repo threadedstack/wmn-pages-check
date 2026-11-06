@@ -1,0 +1,65 @@
+{
+  "schema": 2,
+  "wmdWeb": {
+    "repo": "https://github.com/threadedstack/wmd.git",
+    "commit": "4e1b75a4fd6cd917be414be4863d9a7c268071a1",
+    "date": "2026-11-04T19:22:20-07:00"
+  },
+  "snapshot": true,
+  "files": [
+    {
+      "path": "blobs/sha256/79e912af44e5742138f4d9d7af57f1770eac16c2dfa6ef919ea0d441239c96e8.wasm",
+      "size": 5319833,
+      "sha256": "79e912af44e5742138f4d9d7af57f1770eac16c2dfa6ef919ea0d441239c96e8",
+      "blob": "blobs/sha256/79e912af44e5742138f4d9d7af57f1770eac16c2dfa6ef919ea0d441239c96e8.wasm"
+    },
+    {
+      "path": "guest/arm64/Image",
+      "size": 39047176,
+      "sha256": "89c0717c61c44389918bef60e4ab322907b4b4c0981769e71590208c9b656036",
+      "blob": "blobs/sha256/89c0717c61c44389918bef60e4ab322907b4b4c0981769e71590208c9b656036"
+    },
+    {
+      "path": "guest/arm64/initramfs.cpio.gz",
+      "size": 4667517,
+      "sha256": "988ebc50cf2c1784b8534565a8142ad68f0cd88f9f7cb5664ef18aa24cafadef",
+      "blob": "blobs/sha256/988ebc50cf2c1784b8534565a8142ad68f0cd88f9f7cb5664ef18aa24cafadef.gz"
+    },
+    {
+      "path": "images/alpine/alpine-8e0074253969-551ac6d6-gz6.wmdbase",
+      "size": 50091689,
+      "sha256": "456982746e8bd13161e417d80d9335eaa39ad0f29b61756e33bfa864c751aa09",
+      "blob": "blobs/sha256/456982746e8bd13161e417d80d9335eaa39ad0f29b61756e33bfa864c751aa09.wmdbase"
+    },
+    {
+      "path": "images/alpine/base.json",
+      "size": 1805,
+      "sha256": "abc3f85f72e6251e0b21e0ac09885365f44af7d742094e22dac65d3dbb0ebc8a",
+      "blob": "blobs/sha256/abc3f85f72e6251e0b21e0ac09885365f44af7d742094e22dac65d3dbb0ebc8a.json"
+    },
+    {
+      "path": "images/alpine/image.json",
+      "size": 362,
+      "sha256": "e37344380613fced5d9f0a46b2c86257108e485882870f7e2eb16cffe4a8483b",
+      "blob": "blobs/sha256/e37344380613fced5d9f0a46b2c86257108e485882870f7e2eb16cffe4a8483b.json"
+    },
+    {
+      "path": "images/alpine/layer-0.pack",
+      "size": 8852999,
+      "sha256": "8fa5de60bc39c0f1cb0cc108e50962134925f74c8643463e467572eac3038854",
+      "blob": "blobs/sha256/8fa5de60bc39c0f1cb0cc108e50962134925f74c8643463e467572eac3038854.pack"
+    },
+    {
+      "path": "vm.wasm",
+      "size": 1506414,
+      "sha256": "551ac6d688d1f468e5f96a3dd7ef92e53ff236eb2d89d6fae9631a3aa620892f",
+      "blob": "blobs/sha256/551ac6d688d1f468e5f96a3dd7ef92e53ff236eb2d89d6fae9631a3aa620892f.wasm"
+    },
+    {
+      "path": "wmn-agent/wmn-agent-linux-arm64",
+      "size": 6226080,
+      "sha256": "edabfd26ee39ca45ea4411ee85e51e3e6d2df4001951729ddfd080a68c22ac3e",
+      "blob": "blobs/sha256/edabfd26ee39ca45ea4411ee85e51e3e6d2df4001951729ddfd080a68c22ac3e"
+    }
+  ]
+}
